@@ -1,0 +1,20 @@
+[project]
+name = "parquet-stream-writer"
+version = "0.1.0"
+description = "Write streaming data to Parquet files with automatic sharding."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Antonio Camargo" }]
+dependencies = [
+  "pyarrow>=21.0.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=9.0.2",
+  "pytest-cov>=7.0.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.22,<0.10.0"]
+build-backend = "uv_build"
