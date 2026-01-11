@@ -1,27 +1,29 @@
 # parquet-stream-writer
 
-`parquet-stream-writer` provides a memory-efficient way to write streaming data to Parquet. It buffers incoming records and writes them incrementally to disk. When a configurable size threshold is reached, it starts a new Parquet shard, avoiding the need to load the entire dataset into memory. This makes this library suitable for datasets that are too large to fit in the available memory or for continuously generated data.
+`parquet-stream-writer` provides a memory-efficient way to write streaming data to Parquet. It buffers incoming records and writes them incrementally to disk. It supports automatic sharding when a configurable size threshold is reached, but by default it writes to a single file.
 
 ## Installation
 
 You can install `parquet-stream-writer` from PyPI using `pip` or from conda-forge with [Pixi](https://pixi.sh/).
 
 ### Using pip
-```bash
+
+```sh
 pip install parquet-stream-writer
 ```
 
 ### Using pixi
-```bash
+
+```sh
 pixi init my_workspace && cd my_workspace
 pixi add parquet-stream-writer
 ```
 
 ## Usage
 
-The core class is `ParquetStreamWriter`. It works as a context manager to ensure files are closed properly.
+The library's core class is `ParquetStreamWriter`, which works as a context manager and lets you write data incrementally using its `write_batch` method.
 
-```python
+```py
 import pyarrow as pa
 from parquet_stream_writer import ParquetStreamWriter
 
@@ -41,38 +43,65 @@ def data_stream():
             "value": [float(i)]
         }
 
-# Initialize the writer
-# This will write to ./output_data/shard-0.parquet, ./output_data/shard-1.parquet, etc.
-with ParquetStreamWriter("output_data", schema, overwrite=True) as writer:
+# Initialize an instance of ParquetStreamWriter and write data to `output_data.parquet`
+with ParquetStreamWriter("output_data.parquet", schema, overwrite=True) as writer:
     for batch in data_stream():
         writer.write_batch(batch)
 ```
 
-### Configuring file size and naming
+### Writing with automatic sharding
 
-You can configure when new files are created and how they are named. Additional [PyArrow](https://arrow.apache.org/docs/python/index.html) parameters can be passed through via `**kwargs`.
+By default, `ParquetStreamWriter` writes to a single Parquet file. However, you can enable automatic sharding to split the output into multiple files based on a specified size threshold. To do that, use the `shard_size_bytes` to set the approximate maximum uncompressed size for each file. In this mode, `path` acts as the base directory where shards will be written.
+
+When sharding is enabled, the prefix of the generated files defaults to the name of the output directory. For example, if `path="my_dataset"`, the files will be named `my_dataset-0.parquet`, `my_dataset-1.parquet`, etc. You can override this using the `file_prefix` parameter.
+
+```py
+with ParquetStreamWriter(
+    "my_dataset",                        # Base directory path
+    schema,
+    shard_size_bytes=50 * 1024 * 1024,   # Shards will be approx. 50 MiB each
+    file_prefix="prefix",                # Custom prefix. Files: prefix-0.parquet, ...
+) as writer:
+    for batch in data_stream():
+        writer.write_batch(batch)
+```
+
+### Configuring row group size
+
+The `row_group_size` parameter controls how rows are grouped together within the file. By default, it is set to `None`, which means the group size will be either the total number of rows or 1,048,576, whichever is smaller. Setting a specific value, like 10,000, can make searching and filtering faster because it allows the reader to skip over groups of rows that don't match what you're looking for.
 
 ```python
 with ParquetStreamWriter(
-    "data_stream",
+    "output_data.parquet",
     schema,
-    shard_size_bytes=50 * 1024 * 1024,   # Shards will be approx. 50 MiB each
-    file_prefix="events",                # Output name: events-0.parquet
-    compression="snappy"
+    overwrite=True,
+    row_group_size=10_000
 ) as writer:
-    for batch in stream:
+    for batch in data_stream():
+        writer.write_batch(batch)
+```
+
+### Passing additional parameters to `ParquetWriter`
+
+`ParquetStreamWriter` uses PyArrow's [`ParquetWriter`](https://arrow.apache.org/docs/python/generated/pyarrow.parquet.ParquetWriter.html#pyarrow.parquet.ParquetWriter) class under the hood. You can further customize the Parquet writing behavior by passing any additional parameters supported by `ParquetWriter` via `**kwargs`.
+
+```py
+with ParquetStreamWriter(
+    "output_data.parquet",
+    schema,
+    overwrite=True
+    compression="zstd"                  # Use ZSTD for compression
+    use_content_defined_chunking=True,  # Write data pages according to content-defined chunk boundaries
+) as writer:
+    for batch in data_stream():
         writer.write_batch(batch)
 ```
 
 ### Accessing created files
 
-After the writer closes, you can inspect which files were actually created. This is useful for logging or triggering downstream processes.
+After the writer closes, you can inspect which files it created via the `written_files` attribute.
 
-```python
-with ParquetStreamWriter("output", schema) as writer:
-    writer.write_batch(batch_1)
-    writer.write_batch(batch_2)
-
+```py
 # The 'writer' object stores a list of the files it created
 print("Data was written to the following files:")
 for file_path in writer.written_files:
@@ -90,49 +119,50 @@ management for safe resource cleanup.
 
 Parameters
 ----------
-base_path : str or Path
-    Directory path where Parquet files will be written.
+path : str or Path
+    Path where Parquet files will be written. If shard_size_bytes is None, this is the
+    path to the single output file. If shard_size_bytes is set, this is the base
+    directory where shards will be created. The parent directory must already exist.
 schema : pa.Schema
     PyArrow schema defining the structure of the data to be written.
-shard_size_bytes : int, default 5_368_709_120
-    Approximate maximum uncompressed memory size in bytes for each file before rolling
-    over to a new file. Note that the actual file size on disk will likely be smaller
-    due to compression. Default is 5,368,709,120 bytes (5 GiB).
-file_prefix : str, default "shard"
-    Prefix to use for generated filenames. Files will be named `{file_prefix}-{index}.parquet`.
-compression : {'snappy', 'gzip', 'brotli', 'zstd', 'lz4', 'none'} or None, default 'zstd'
-    Compression codec to use. Can be a string specifying the codec for all columns,
-    or None for no compression. Default is 'zstd'.
-row_group_size : int or None, default 10_000
-    Number of rows per row group. If None, uses PyArrow's default behavior.
-    Default is 10,000.
+shard_size_bytes : int or None, default None
+    Approximate maximum uncompressed memory size in bytes for each shard before starting
+    to write to a new file. If None (default), sharding is disabled and a single
+    file is written to path. If set to an integer, path is treated as a base directory
+    and shards are created inside it.
+file_prefix : str or None, default None
+    Prefix to use for generated filenames (only used when sharding is enabled).
+    If None (default), uses the name of the `path`.
+    Files will be named `{file_prefix}-{index}.parquet`.
+row_group_size : int or None, default None
+    Number of rows per row group. If None (default), the row group size will be
+    either the total number of rows or 1,048,576, whichever is smaller.
 overwrite : bool, default False
-    If True, removes and recreates the output directory if it already exists.
-    If False, raises FileExistsError when the directory exists.
+    If True, deletes existing output file or directory before writing.
+    If False, raises FileExistsError when the output exists.
     Default is False.
 **kwargs : dict, optional
     Additional keyword arguments passed to pyarrow.parquet.ParquetWriter.
 
 Attributes
 ----------
-base_path : Path
-    The base directory path for output files.
+path : Path
+    The output path.
 schema : pa.Schema
     The PyArrow schema for the data.
-shard_size_bytes : int
+shard_size_bytes : int or None
     Maximum uncompressed size threshold for each file.
 file_prefix : str
-    Prefix used for naming files.
-compression : str or None
-    The compression codec configuration.
+    Prefix used for naming files (if sharding).
 row_group_size : int or None
     Number of rows per row group.
-shard_index : int
-    Current file number (incremented for each new file).
 writer : pq.ParquetWriter or None
     Current active Parquet writer instance.
-current_size : int
-    Accumulated uncompressed size in bytes of the current file.
 written_files : list[Path]
     List of absolute paths to all successfully created Parquet files.
+
+Methods
+-------
+write_batch
+    Write a data batch to the output.
 ```

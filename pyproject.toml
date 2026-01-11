@@ -1,6 +1,6 @@
 [project]
 name = "parquet-stream-writer"
-version = "0.1.1"
+version = "0.2.0"
 description = "Write streaming data to Parquet files with automatic sharding."
 readme = "README.md"
 requires-python = ">=3.10"
