@@ -13,30 +13,29 @@ class ParquetStreamWriter:
     """
     A writer for writing streaming data to Parquet files with automatic file rollover.
 
-    This class manages writing large or infinite datasets to multiple Parquet files (shards),
-    automatically creating new files when a size threshold is reached. It supports context
-    management for safe resource cleanup.
+    This class manages writing large or infinite datasets to multiple Parquet files
+    (shards), automatically creating new files when a size threshold is reached.
 
     Parameters
     ----------
     path : str or Path
-        Path where Parquet files will be written. If shard_size_bytes is None, this is the
-        path to the single output file. If shard_size_bytes is set, this is the base
-        directory where shards will be created. The parent directory must already exist.
+        Path where Parquet files will be written. If shard_size_bytes is None,
+        this is the path to the single output file. If shard_size_bytes is set,
+        this is the base directory where shards will be created.
     schema : pa.Schema
         PyArrow schema defining the structure of the data to be written.
     shard_size_bytes : int or None, default None
-        Approximate maximum uncompressed memory size in bytes for each shard before starting
-        to write to a new file. If None (default), sharding is disabled and a single
-        file is written to path. If set to an integer, path is treated as a base directory
-        and shards are created inside it.
+        Approximate maximum uncompressed memory size in bytes for each shard
+        before starting to write to a new file. If None (default), sharding is
+        disabled and a single file is written to path. If set to an integer,
+        path is treated as a base directory and shards are created inside it.
     file_prefix : str or None, default None
-        Prefix to use for generated filenames (only used when sharding is enabled).
-        If None (default), uses the name of the `path`.
-        Files will be named `{file_prefix}-{index}.parquet`.
+        Prefix to use for generated filenames (only used when sharding is
+        enabled). If None (default), the value of `path` will be used as the
+        prefix and files will be named '{file_prefix}-{index}.parquet'.
     row_group_size : int or None, default None
-        Number of rows per row group. If None (default), the row group size will be
-        either the total number of rows or 1,048,576, whichever is smaller.
+        Number of rows per row group. If None (default), the row group size will
+        be either the total number of rows or 1,048,576, whichever is smaller.
     overwrite : bool, default False
         If True, deletes existing output file or directory before writing.
         If False, raises FileExistsError when the output exists.
@@ -84,23 +83,26 @@ class ParquetStreamWriter:
         overwrite: bool = False,
         **kwargs,
     ) -> None:
-        self.path = Path(path)
-        self.schema = schema
-        self.shard_size_bytes = shard_size_bytes
-        self.file_prefix = file_prefix if file_prefix is not None else self.path.name
-        self.row_group_size = row_group_size
-        self._writer_kwargs = kwargs
+        self.path: Path = Path(path)
+        self.schema: pa.Schema = schema
+        self.shard_size_bytes: int | None = shard_size_bytes
+        self.file_prefix: str = (
+            file_prefix if file_prefix is not None else self.path.name
+        )
+        self.row_group_size: int | None = row_group_size
+        self._writer_kwargs: dict = kwargs
         self.writer: pq.ParquetWriter | None = None
         self.written_files: list[Path] = []
-        self._current_size = 0
-        self._shard_index = 0
+        self._current_size: int = 0
+        self._current_shard_index: int = 0
+        self._current_shard_path: Path | None = None
 
         # Handle existing output
         if self.path.exists():
             if overwrite:
                 if self.path.is_file():
                     self.path.unlink()
-                    logger.info(f"Removed existing filec '{self.path}'")
+                    logger.info(f"Removed existing file '{self.path}'")
                 else:
                     shutil.rmtree(self.path)
                     logger.info(f"Removed existing directory '{self.path}'")
@@ -126,21 +128,23 @@ class ParquetStreamWriter:
             self.writer.close()
 
         if self.shard_size_bytes is None:
-            shard_path = self.path
+            self._current_shard_path = self.path
         else:
-            shard_name = f"{self.file_prefix}-{self._shard_index}.parquet"
-            shard_path = self.path / shard_name
-            self._shard_index += 1
+            current_shard_name = (
+                f"{self.file_prefix}-{self._current_shard_index}.parquet"
+            )
+            self._current_shard_path = self.path / current_shard_name
+            self._current_shard_index += 1
 
-        logger.info(f"Opening file: {shard_path}")
+        logger.info(f"Opening file '{self._current_shard_path}'")
 
         self.writer = pq.ParquetWriter(
-            str(shard_path),
+            str(self._current_shard_path),
             self.schema,
             **self._writer_kwargs,
         )
         self._current_size = 0
-        self.written_files.append(shard_path.absolute())
+        self.written_files.append(self._current_shard_path.absolute())
         return self.writer
 
     def write_batch(self, data: dict | pa.Table) -> None:
@@ -173,23 +177,22 @@ class ParquetStreamWriter:
         else:
             raise TypeError("Data must be a dict or pyarrow.Table")
 
-        batch_size = table.nbytes
-
         if self.writer is None:
             writer = self._open_new_shard()
         elif (
             self.shard_size_bytes is not None
-            and self._current_size + batch_size > self.shard_size_bytes
+            and self._current_size + table.nbytes > self.shard_size_bytes
         ):
             writer = self._open_new_shard()
         else:
             writer = self.writer
 
         writer.write_table(table, self.row_group_size)
-        self._current_size += batch_size
+        self._current_size += table.nbytes
 
     def close(self) -> None:
         if self.writer:
             self.writer.close()
+            logger.info(f"Closed file '{self._current_shard_path}'")
             self.writer = None
-            logger.info("Closed current file writer.")
+            self._current_shard_path = None

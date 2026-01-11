@@ -1,6 +1,6 @@
 # parquet-stream-writer
 
-`parquet-stream-writer` provides a memory-efficient way to write streaming data to Parquet. It buffers incoming records and writes them incrementally to disk. It supports automatic sharding when a configurable size threshold is reached, but by default it writes to a single file.
+`parquet-stream-writer` enables streaming data to be written to [Parquet](https://parquet.apache.org/) files with automatic sharding (splitting data across multiple files). When a file reaches a user-defined size limit, the writer automatically creates a new file. This prevents the accumulation of unwieldy, monolithic Parquet files during stream processing.
 
 ## Installation
 
@@ -28,22 +28,16 @@ import pyarrow as pa
 from parquet_stream_writer import ParquetStreamWriter
 
 # Define your schema
-schema = pa.schema([
-    ("timestamp", pa.int64()),
-    ("event_type", pa.string()),
-    ("value", pa.float64())
-])
+schema = pa.schema(
+    [("col_a", pa.int64()), ("col_b", pa.string()), ("col_c", pa.bool_())]
+)
 
 # Simulate a data stream
 def data_stream():
-    for i in range(100):
-        yield {
-            "timestamp": [i],
-            "event_type": ["reading"],
-            "value": [float(i)]
-        }
+    for i in range(1_000):
+        yield {"col_a": [i, i + 1], "col_b": ["foo", "bar"], "col_c": [True, False]}
 
-# Initialize an instance of ParquetStreamWriter and write data to `output_data.parquet`
+# Initialize an instance of `ParquetStreamWriter` and write data to `output_data.parquet`
 with ParquetStreamWriter("output_data.parquet", schema, overwrite=True) as writer:
     for batch in data_stream():
         writer.write_batch(batch)
@@ -113,30 +107,29 @@ for file_path in writer.written_files:
 ```
 A writer for writing streaming data to Parquet files with automatic file rollover.
 
-This class manages writing large or infinite datasets to multiple Parquet files (shards),
-automatically creating new files when a size threshold is reached. It supports context
-management for safe resource cleanup.
+This class manages writing large or infinite datasets to multiple Parquet files
+(shards), automatically creating new files when a size threshold is reached.
 
 Parameters
 ----------
 path : str or Path
-    Path where Parquet files will be written. If shard_size_bytes is None, this is the
-    path to the single output file. If shard_size_bytes is set, this is the base
-    directory where shards will be created. The parent directory must already exist.
+    Path where Parquet files will be written. If shard_size_bytes is None,
+    this is the path to the single output file. If shard_size_bytes is set,
+    this is the base directory where shards will be created.
 schema : pa.Schema
     PyArrow schema defining the structure of the data to be written.
 shard_size_bytes : int or None, default None
-    Approximate maximum uncompressed memory size in bytes for each shard before starting
-    to write to a new file. If None (default), sharding is disabled and a single
-    file is written to path. If set to an integer, path is treated as a base directory
-    and shards are created inside it.
+    Approximate maximum uncompressed memory size in bytes for each shard
+    before starting to write to a new file. If None (default), sharding is
+    disabled and a single file is written to path. If set to an integer,
+    path is treated as a base directory and shards are created inside it.
 file_prefix : str or None, default None
-    Prefix to use for generated filenames (only used when sharding is enabled).
-    If None (default), uses the name of the `path`.
-    Files will be named `{file_prefix}-{index}.parquet`.
+    Prefix to use for generated filenames (only used when sharding is
+    enabled). If None (default), the value of `path` will be used as the
+    prefix and files will be named '{file_prefix}-{index}.parquet'.
 row_group_size : int or None, default None
-    Number of rows per row group. If None (default), the row group size will be
-    either the total number of rows or 1,048,576, whichever is smaller.
+    Number of rows per row group. If None (default), the row group size will
+    be either the total number of rows or 1,048,576, whichever is smaller.
 overwrite : bool, default False
     If True, deletes existing output file or directory before writing.
     If False, raises FileExistsError when the output exists.
@@ -165,4 +158,11 @@ Methods
 -------
 write_batch
     Write a data batch to the output.
+
+Raises
+------
+FileExistsError
+    If the output path already exists and overwrite is False.
+FileNotFoundError
+    If the parent directory of the output path does not exist.
 ```
