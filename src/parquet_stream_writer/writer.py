@@ -1,12 +1,44 @@
 import logging
 import shutil
 from pathlib import Path
-from typing import Literal
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 logger = logging.getLogger(__name__)
+
+
+class BatchBuffer:
+    def __init__(self, schema: pa.Schema, max_size_bytes: int | None):
+        self.schema = schema
+        self.max_size_bytes = max_size_bytes
+        self._batches: list[pa.RecordBatch] = []
+        self._current_size: int = 0
+
+    def add(self, batch: pa.RecordBatch) -> None:
+        self._batches.append(batch)
+        self._current_size += batch.nbytes
+
+    def is_full(self) -> bool:
+        if self.max_size_bytes is None:
+            return False
+        return self._current_size >= self.max_size_bytes
+
+    def to_table(self) -> pa.Table:
+        if not self._batches:
+            return pa.Table.from_batches([], schema=self.schema)
+        return pa.Table.from_batches(self._batches, schema=self.schema)
+
+    def clear(self) -> None:
+        self._batches.clear()
+        self._current_size = 0
+
+    def __bool__(self) -> bool:
+        return bool(self._batches)
+
+    @property
+    def current_size(self) -> int:
+        return self._current_size
 
 
 class ParquetStreamWriter:
@@ -29,13 +61,15 @@ class ParquetStreamWriter:
         before starting to write to a new file. If None (default), sharding is
         disabled and a single file is written to path. If set to an integer,
         path is treated as a base directory and shards are created inside it.
+    row_group_size : int or None, default None
+        Maximum number of rows in written row group.
+    buffer_size_bytes : int, default 16_777_216
+        Maximum size in bytes of the in-memory buffer before flushing to disk.
+        Must be <= shard_size_bytes.
     file_prefix : str or None, default None
         Prefix to use for generated filenames (only used when sharding is
         enabled). If None (default), the value of `path` will be used as the
         prefix and files will be named '{file_prefix}-{index}.parquet'.
-    row_group_size : int or None, default None
-        Number of rows per row group. If None (default), the row group size will
-        be either the total number of rows or 1,048,576, whichever is smaller.
     overwrite : bool, default False
         If True, deletes existing output file or directory before writing.
         If False, raises FileExistsError when the output exists.
@@ -51,10 +85,12 @@ class ParquetStreamWriter:
         The PyArrow schema for the data.
     shard_size_bytes : int or None
         Maximum uncompressed size threshold for each file.
-    file_prefix : str
-        Prefix used for naming files (if sharding).
     row_group_size : int or None
-        Number of rows per row group.
+        Maximum number of rows in written row group.
+    buffer_size_bytes : int or None
+        Maximum size of in-memory buffer before flushing.
+    file_prefix : str
+        Prefix used for naming files if sharding is enabled.
     writer : pq.ParquetWriter or None
         Current active Parquet writer instance.
     written_files : list[Path]
@@ -64,6 +100,8 @@ class ParquetStreamWriter:
     -------
     write_batch
         Write a data batch to the output.
+    flush
+        Flush buffered data to the current shard.
 
     Raises
     ------
@@ -71,6 +109,8 @@ class ParquetStreamWriter:
         If the output path already exists and overwrite is False.
     FileNotFoundError
         If the parent directory of the output path does not exist.
+    ValueError
+        If shard_size_bytes or buffer_size_bytes is negative.
     """
 
     def __init__(
@@ -78,14 +118,22 @@ class ParquetStreamWriter:
         path: str | Path,
         schema: pa.Schema,
         shard_size_bytes: int | None = None,
+        buffer_size_bytes: int = 16_777_216,
         file_prefix: str | None = None,
         row_group_size: int | None = None,
         overwrite: bool = False,
         **kwargs,
     ) -> None:
+        # Validate size parameters
+        if shard_size_bytes is not None and shard_size_bytes < 0:
+            raise ValueError("shard_size_bytes must be non-negative")
+        if buffer_size_bytes is not None and buffer_size_bytes < 0:
+            raise ValueError("buffer_size_bytes must be non-negative")
+
         self.path: Path = Path(path)
         self.schema: pa.Schema = schema
         self.shard_size_bytes: int | None = shard_size_bytes
+        self.buffer_size_bytes: int = buffer_size_bytes
         self.file_prefix: str = (
             file_prefix if file_prefix is not None else self.path.name
         )
@@ -96,6 +144,9 @@ class ParquetStreamWriter:
         self._current_size: int = 0
         self._current_shard_index: int = 0
         self._current_shard_path: Path | None = None
+
+        # Create a buffer for incoming data
+        self._buffer = BatchBuffer(schema, self.buffer_size_bytes)
 
         # Handle existing output
         if self.path.exists():
@@ -147,50 +198,104 @@ class ParquetStreamWriter:
         self.written_files.append(self._current_shard_path.absolute())
         return self.writer
 
-    def write_batch(self, data: dict | pa.Table) -> None:
+    def _is_shard_full(self) -> bool:
+        if self.shard_size_bytes is None:
+            return False
+        return self._current_size > self.shard_size_bytes
+
+    def _normalize_data(
+        self, data: dict | pa.Table | pa.RecordBatch
+    ) -> list[pa.RecordBatch]:
+        batches: list[pa.RecordBatch] = []
+        if isinstance(data, dict):
+            # Create RecordBatch directly from dict
+            batches.append(pa.RecordBatch.from_pydict(data, schema=self.schema))
+        elif isinstance(data, pa.RecordBatch):
+            # Cast the RecordBatch to schema
+            batches.append(
+                pa.Table.from_batches([data]).cast(self.schema).to_batches()[0]
+            )
+        elif isinstance(data, pa.Table):
+            # Convert table to RecordBatches and cast
+            batches.extend(data.cast(self.schema).to_batches())
+        else:
+            raise TypeError(
+                "Data must be a dict, pyarrow.Table, or pyarrow.RecordBatch"
+            )
+        return batches
+
+    def write_batch(self, data: dict | pa.Table | pa.RecordBatch) -> None:
         """
         Write a data batch to the output.
 
         The data is automatically cast to the schema defined at initialization.
-        If sharding is enabled and the current file exceeds the size threshold,
-        a new file is created.
+        Data is buffered in memory as RecordBatches. When the buffer exceeds
+        the buffer_size_bytes threshold (if set), the buffer is flushed to disk.
+        When a shard exceeds shard_size_bytes, a new shard file is created.
 
         Parameters
         ----------
-        data : dict or pa.Table
+        data : dict, pa.Table, or pa.RecordBatch
             Data to write. If dict, keys are column names and values are lists.
-            If pa.Table, it will be cast to the schema provided at initialization.
+            If pa.Table or pa.RecordBatch, it will be cast to the schema provided
+            at initialization.
 
         Raises
         ------
         TypeError
-            If data is not a dict or pyarrow.Table.
+            If data is not a dict, pyarrow.Table, or pyarrow.RecordBatch.
         pa.ArrowInvalid
             If the data cannot be cast to the specified schema.
         """
-        if isinstance(data, dict):
-            table = pa.Table.from_pydict(data)
-            table = table.cast(self.schema)
-        elif isinstance(data, pa.Table):
-            # Ensure the table matches the schema
-            table = data.cast(self.schema)
-        else:
-            raise TypeError("Data must be a dict or pyarrow.Table")
+        # Convert input to list of RecordBatches and cast to schema
+        batches = self._normalize_data(data)
 
+        # Buffer the batches
+        for batch in batches:
+            self._buffer.add(batch)
+
+        # Check if we need to flush the buffer (memory management)
+        # or if the current shard is full
+        if self._buffer.is_full() or self._is_shard_full():
+            # If the shard is full and we have already written data to it,
+            # rotate to a new shard before flushing the buffer.
+            if self._is_shard_full() and self._current_size > 0:
+                self._open_new_shard()
+            self.flush()
+
+    def flush(self) -> None:
+        """
+        Flush buffered RecordBatches to the current shard.
+
+        Combines all buffered RecordBatches into a single Table and writes it
+        to the Parquet file.
+
+        This method is automatically called when the buffer size exceeds
+        buffer_size_bytes, or when shard limits are reached. It can also be called
+        manually to force writing buffered data.
+        """
+        if not self._buffer:
+            return
+
+        # Combine buffered batches into a single table (zero-copy)
+        table = self._buffer.to_table()
+        current_buffer_size = self._buffer.current_size
+
+        # Ensure we have a writer open
         if self.writer is None:
-            writer = self._open_new_shard()
-        elif (
-            self.shard_size_bytes is not None
-            and self._current_size + table.nbytes > self.shard_size_bytes
-        ):
-            writer = self._open_new_shard()
-        else:
-            writer = self.writer
+            self._open_new_shard()
 
-        writer.write_table(table, self.row_group_size)
-        self._current_size += table.nbytes
+        # Write the combined table
+        self.writer.write_table(table, self.row_group_size)
+        self._current_size += current_buffer_size
+
+        # Clear the buffer
+        self._buffer.clear()
 
     def close(self) -> None:
+        # Flush any remaining buffered data
+        self.flush()
+        # Close the current writer if open
         if self.writer:
             self.writer.close()
             logger.info(f"Closed file '{self._current_shard_path}'")

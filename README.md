@@ -53,8 +53,22 @@ When sharding is enabled, the prefix of the generated files defaults to the name
 with ParquetStreamWriter(
     "my_dataset",                        # Base directory path
     schema,
-    shard_size_bytes=50 * 1024 * 1024,   # Shards will be approx. 50 MiB each
-    file_prefix="prefix",                # Custom prefix. Files: prefix-0.parquet, ...
+    shard_size_bytes=50 * 1024 * 1024,   # Shards will be approx. 50 MiB
+    file_prefix="prefix",                # Custom prefix
+) as writer:
+    for batch in data_stream():
+        writer.write_batch(batch)
+```
+
+### Configuring buffer size
+
+By default, `ParquetStreamWriter` uses an in-memory buffer of 16 MiB to accumulate data before writing it to disk. You can adjust this size using the `buffer_size_bytes` parameter. A larger buffer can improve write performance by reducing the number of write operations, but it also increases memory usage. Smaller buffers will lead to more frequent writes and larger files, as encoding overhead is incurred with each write.
+
+```py
+with ParquetStreamWriter(
+    "my_dataset",                        # Base directory path
+    schema,
+    buffer_size_bytes=200 * 1024 * 1024,   # The in-memory buffer will be approx. 200 MiB
 ) as writer:
     for batch in data_stream():
         writer.write_batch(batch)
@@ -99,7 +113,7 @@ After the writer closes, you can inspect which files it created via the `written
 # The 'writer' object stores a list of the files it created
 print("Data was written to the following files:")
 for file_path in writer.written_files:
-    print(file_path)
+print(f"{file_path}: {file_path.stat().st_size} bytes")
 ```
 
 ## `ParquetStreamWriter` API reference
@@ -123,13 +137,15 @@ shard_size_bytes : int or None, default None
     before starting to write to a new file. If None (default), sharding is
     disabled and a single file is written to path. If set to an integer,
     path is treated as a base directory and shards are created inside it.
+row_group_size : int or None, default None
+    Maximum number of rows in written row group.
+buffer_size_bytes : int, default 16_777_216
+    Maximum size in bytes of the in-memory buffer before flushing to disk.
+    Must be <= shard_size_bytes.
 file_prefix : str or None, default None
     Prefix to use for generated filenames (only used when sharding is
     enabled). If None (default), the value of `path` will be used as the
     prefix and files will be named '{file_prefix}-{index}.parquet'.
-row_group_size : int or None, default None
-    Number of rows per row group. If None (default), the row group size will
-    be either the total number of rows or 1,048,576, whichever is smaller.
 overwrite : bool, default False
     If True, deletes existing output file or directory before writing.
     If False, raises FileExistsError when the output exists.
@@ -145,10 +161,12 @@ schema : pa.Schema
     The PyArrow schema for the data.
 shard_size_bytes : int or None
     Maximum uncompressed size threshold for each file.
-file_prefix : str
-    Prefix used for naming files (if sharding).
 row_group_size : int or None
-    Number of rows per row group.
+    Maximum number of rows in written row group.
+buffer_size_bytes : int or None
+    Maximum size of in-memory buffer before flushing.
+file_prefix : str
+    Prefix used for naming files if sharding is enabled.
 writer : pq.ParquetWriter or None
     Current active Parquet writer instance.
 written_files : list[Path]
@@ -158,6 +176,8 @@ Methods
 -------
 write_batch
     Write a data batch to the output.
+flush
+    Flush buffered data to the current shard.
 
 Raises
 ------
@@ -165,4 +185,6 @@ FileExistsError
     If the output path already exists and overwrite is False.
 FileNotFoundError
     If the parent directory of the output path does not exist.
+ValueError
+    If shard_size_bytes or buffer_size_bytes is negative.
 ```
