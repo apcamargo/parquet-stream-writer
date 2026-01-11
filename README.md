@@ -78,3 +78,61 @@ print("Data was written to the following files:")
 for file_path in writer.written_files:
     print(file_path)
 ```
+
+## `ParquetStreamWriter` API reference
+
+```
+A writer for writing streaming data to Parquet files with automatic file rollover.
+
+This class manages writing large or infinite datasets to multiple Parquet files (shards),
+automatically creating new files when a size threshold is reached. It supports context
+management for safe resource cleanup.
+
+Parameters
+----------
+base_path : str or Path
+    Directory path where Parquet files will be written.
+schema : pa.Schema
+    PyArrow schema defining the structure of the data to be written.
+shard_size_bytes : int, default 5_368_709_120
+    Approximate maximum uncompressed memory size in bytes for each file before rolling
+    over to a new file. Note that the actual file size on disk will likely be smaller
+    due to compression. Default is 5,368,709,120 bytes (5 GiB).
+file_prefix : str, default "shard"
+    Prefix to use for generated filenames. Files will be named `{file_prefix}-{index}.parquet`.
+compression : {'snappy', 'gzip', 'brotli', 'zstd', 'lz4', 'none'} or None, default 'zstd'
+    Compression codec to use. Can be a string specifying the codec for all columns,
+    or None for no compression. Default is 'zstd'.
+row_group_size : int or None, default 10_000
+    Number of rows per row group. If None, uses PyArrow's default behavior.
+    Default is 10,000.
+overwrite : bool, default False
+    If True, removes and recreates the output directory if it already exists.
+    If False, raises FileExistsError when the directory exists.
+    Default is False.
+**kwargs : dict, optional
+    Additional keyword arguments passed to pyarrow.parquet.ParquetWriter.
+
+Attributes
+----------
+base_path : Path
+    The base directory path for output files.
+schema : pa.Schema
+    The PyArrow schema for the data.
+shard_size_bytes : int
+    Maximum uncompressed size threshold for each file.
+file_prefix : str
+    Prefix used for naming files.
+compression : str or None
+    The compression codec configuration.
+row_group_size : int or None
+    Number of rows per row group.
+shard_index : int
+    Current file number (incremented for each new file).
+writer : pq.ParquetWriter or None
+    Current active Parquet writer instance.
+current_size : int
+    Accumulated uncompressed size in bytes of the current file.
+written_files : list[Path]
+    List of absolute paths to all successfully created Parquet files.
+```
