@@ -1,6 +1,6 @@
 [project]
 name = "parquet-stream-writer"
-version = "0.1.0"
+version = "0.1.1"
 description = "Write streaming data to Parquet files with automatic sharding."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -9,6 +9,10 @@ authors = [{ name = "Antonio Camargo" }]
 dependencies = [
   "pyarrow>=21.0.0",
 ]
+
+[project.urls]
+documentation = "https://github.com/apcamargo/parquet-stream-writer"
+homepage = "https://github.com/apcamargo/parquet-stream-writer"
 
 [dependency-groups]
 dev = [
@@ -19,3 +23,10 @@ dev = [
 [build-system]
 requires = ["uv_build>=0.9.22,<0.10.0"]
 build-backend = "uv_build"
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64", "osx-64", "osx-arm64"]
+
+[tool.pixi.pypi-dependencies]
+parquet-stream-writer = { path = "." }
