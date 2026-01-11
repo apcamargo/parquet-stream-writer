@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Write streaming data to Parquet files with automatic sharding."
 readme = "README.md"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
 authors = [{ name = "Antonio Camargo" }]
 dependencies = [
   "pyarrow>=21.0.0",
